@@ -11,4 +11,8 @@ if (/\bmodule_free\s*\(/.test(source)) {
   throw new Error("Android GKI moduleloader.h exposes module_memfree(), not module_free()");
 }
 
+if (/for\s*\(\s*(?:const\s+)?(?:char|int|long|pid_t|size_t|unsigned|struct)\b/.test(source)) {
+  throw new Error("kernel C code must not declare variables in for-loop initializers");
+}
+
 console.log("Kernel source checks passed");

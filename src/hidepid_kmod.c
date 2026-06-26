@@ -528,9 +528,11 @@ static void remove_hook(struct hook_ctx *h) {
 /* ==================== PID 解析 ==================== */
 
 static bool parse_pid(const char *name, pid_t *out) {
-    if (!name || !*name) return false;
     long val = 0;
-    for (const char *p = name; *p; ++p) {
+    const char *p;
+
+    if (!name || !*name) return false;
+    for (p = name; *p; ++p) {
         if (*p < '0' || *p > '9') return false;
         val = val * 10 + (*p - '0');
         if (val > INT_MAX) return false;
