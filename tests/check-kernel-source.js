@@ -15,4 +15,14 @@ if (/for\s*\(\s*(?:const\s+)?(?:char|int|long|pid_t|size_t|unsigned|struct)\b/.t
   throw new Error("kernel C code must not declare variables in for-loop initializers");
 }
 
+for (const line of source.split(/\r?\n/)) {
+  if (line.includes("static ")) continue;
+  if (/char\s+\w+\s*\[\s*MAX_HIDE_APPS\s*\]\s*\[\s*MAX_PKG_NAME_LEN\s*\]/.test(line)) {
+    throw new Error("large app arrays must be heap-allocated, not placed on the kernel stack");
+  }
+  if (/pid_t\s+\w+\s*\[\s*MAX_HIDE_PIDS\s*\]/.test(line)) {
+    throw new Error("large PID arrays must be heap-allocated, not placed on the kernel stack");
+  }
+}
+
 console.log("Kernel source checks passed");

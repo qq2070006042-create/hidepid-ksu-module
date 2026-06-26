@@ -267,17 +267,22 @@ static void scan_work_fn(struct work_struct *work) {
     struct task_struct *task;
     char cmdline[MAX_PKG_NAME_LEN];
     int i, app_cnt;
-    char apps_snapshot[MAX_HIDE_APPS][MAX_PKG_NAME_LEN];
+    char (*apps_snapshot)[MAX_PKG_NAME_LEN];
     unsigned long flags;
+
+    apps_snapshot = kcalloc(MAX_HIDE_APPS, sizeof(*apps_snapshot), GFP_KERNEL);
+    if (!apps_snapshot)
+        return;
 
     /* 快照当前隐藏应用列表 */
     spin_lock_irqsave(&hide_lock, flags);
     app_cnt = hide_app_count;
-    memcpy(apps_snapshot, hide_apps, sizeof(apps_snapshot));
+    memcpy(apps_snapshot, hide_apps, sizeof(*apps_snapshot) * app_cnt);
     spin_unlock_irqrestore(&hide_lock, flags);
 
     if (app_cnt == 0) {
         scan_active = false;
+        kfree(apps_snapshot);
         return;
     }
 
@@ -305,6 +310,8 @@ static void scan_work_fn(struct work_struct *work) {
     if (scan_active) {
         schedule_delayed_work(&scan_work, msecs_to_jiffies(SCAN_INTERVAL_MS));
     }
+
+    kfree(apps_snapshot);
 }
 
 static void start_scan(void) {
@@ -715,16 +722,24 @@ static struct proc_dir_entry *hidepid_entry;
 static int hidepid_proc_show(struct seq_file *m, void *v) {
     int i;
     unsigned long flags;
-    pid_t pids_copy[MAX_HIDE_PIDS];
+    pid_t *pids_copy;
     int pid_count_copy;
-    char apps_copy[MAX_HIDE_APPS][MAX_PKG_NAME_LEN];
+    char (*apps_copy)[MAX_PKG_NAME_LEN];
     int app_count_copy;
+
+    pids_copy = kcalloc(MAX_HIDE_PIDS, sizeof(*pids_copy), GFP_KERNEL);
+    apps_copy = kcalloc(MAX_HIDE_APPS, sizeof(*apps_copy), GFP_KERNEL);
+    if (!pids_copy || !apps_copy) {
+        kfree(pids_copy);
+        kfree(apps_copy);
+        return -ENOMEM;
+    }
 
     spin_lock_irqsave(&hide_lock, flags);
     pid_count_copy = hide_count;
     memcpy(pids_copy, hide_pids, sizeof(pid_t) * pid_count_copy);
     app_count_copy = hide_app_count;
-    memcpy(apps_copy, hide_apps, sizeof(apps_copy));
+    memcpy(apps_copy, hide_apps, sizeof(*apps_copy) * app_count_copy);
     spin_unlock_irqrestore(&hide_lock, flags);
 
     seq_printf(m, "=== Hidden PIDs (%d/%d) ===\n", pid_count_copy, MAX_HIDE_PIDS);
@@ -740,6 +755,8 @@ static int hidepid_proc_show(struct seq_file *m, void *v) {
     seq_printf(m, "\n=== Scan Status ===\n");
     seq_printf(m, "scan: %s\n", scan_active ? "on" : "off");
 
+    kfree(pids_copy);
+    kfree(apps_copy);
     return 0;
 }
 
