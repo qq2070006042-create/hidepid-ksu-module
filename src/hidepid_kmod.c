@@ -520,7 +520,7 @@ static void remove_hook(struct hook_ctx *h) {
     schedule();
     synchronize_rcu();
 
-    module_free(NULL, h->trampoline);
+    module_memfree(h->trampoline);
     h->active = false;
     hide_info("unhooked @%px\n", h->target);
 }
