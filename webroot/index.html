@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>HidePID 管理</title>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --card: #161b22;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-muted: #7d8590;
+            --accent: #2f81f7;
+            --danger: #f85149;
+            --success: #3fb950;
+            --warn: #d29922;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, 'Noto Sans CJK SC', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            padding: 16px;
+            padding-bottom: 80px;
+        }
+        .header {
+            text-align: center;
+            padding: 20px 0;
+        }
+        .header h1 { font-size: 24px; font-weight: 600; }
+        .header p { color: var(--text-muted); font-size: 13px; margin-top: 4px; }
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            margin-top: 8px;
+        }
+        .status-badge.ok { background: rgba(63,185,80,0.15); color: var(--success); }
+        .status-badge.err { background: rgba(248,81,73,0.15); color: var(--danger); }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+        .status-badge.ok .status-dot { background: var(--success); }
+        .status-badge.err .status-dot { background: var(--danger); }
+
+        .section {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .section-title .icon { font-size: 18px; }
+
+        .input-row {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        input[type="text"], input[type="number"] {
+            flex: 1;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: var(--text);
+            font-size: 14px;
+            outline: none;
+        }
+        input:focus { border-color: var(--accent); }
+
+        .btn {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .btn-primary { background: var(--accent); color: #fff; }
+        .btn-danger { background: var(--danger); color: #fff; }
+        .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
+
+        .list-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            background: var(--bg);
+            border-radius: 8px;
+            margin-bottom: 6px;
+            font-size: 14px;
+        }
+        .list-item .name { font-family: monospace; }
+        .list-item .actions { display: flex; gap: 6px; }
+        .btn-sm {
+            padding: 4px 10px;
+            font-size: 12px;
+            border-radius: 6px;
+            border: none;
+            cursor: pointer;
+        }
+        .btn-sm-del { background: rgba(248,81,73,0.2); color: var(--danger); }
+        .btn-sm-del:active { background: var(--danger); color: #fff; }
+
+        .empty {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 20px;
+            font-size: 13px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 4px;
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 3px;
+            margin-bottom: 12px;
+        }
+        .tab {
+            flex: 1;
+            padding: 8px;
+            text-align: center;
+            border-radius: 6px;
+            font-size: 13px;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .tab.active { background: var(--card); color: var(--text); }
+
+        .app-picker {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        select {
+            flex: 1;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: var(--text);
+            font-size: 14px;
+            outline: none;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--card);
+            border: 1px solid var(--border);
+            color: var(--text);
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 999;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+        }
+        .toast.show { opacity: 1; }
+
+        .scan-toggle {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 0;
+        }
+        .switch {
+            position: relative;
+            width: 44px;
+            height: 24px;
+            background: var(--border);
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .switch.on { background: var(--success); }
+        .switch::after {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 20px;
+            height: 20px;
+            background: #fff;
+            border-radius: 50%;
+            transition: transform 0.2s;
+        }
+        .switch.on::after { transform: translateX(20px); }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>HidePID</h1>
+        <p>PID + 应用隐藏管理</p>
+        <div id="status" class="status-badge err">
+            <span class="status-dot"></span>
+            <span id="status-text">检查中...</span>
+        </div>
+    </div>
+
+    <!-- 进程管理 -->
+    <div class="section">
+        <div class="section-title"><span class="icon">🔒</span> 进程隐藏</div>
+        <div class="input-row">
+            <input type="text" id="pid-input" placeholder="输入 PID 或进程名 (0=隐藏自身)">
+            <button class="btn btn-primary" onclick="addPid()">添加</button>
+        </div>
+        <div id="pid-list"></div>
+    </div>
+
+    <!-- 应用管理 -->
+    <div class="section">
+        <div class="section-title"><span class="icon">📦</span> 应用隐藏</div>
+        <div class="app-picker">
+            <select id="app-select">
+                <option value="">选择应用或手动输入包名</option>
+            </select>
+            <button class="btn btn-ghost" onclick="loadApps()">刷新</button>
+        </div>
+        <div class="input-row">
+            <input type="text" id="pkg-input" placeholder="或手动输入包名 com.example.app">
+            <button class="btn btn-primary" onclick="addApp()">隐藏</button>
+        </div>
+        <div id="app-list"></div>
+        <div class="scan-toggle">
+            <div>
+                <div style="font-size:14px;">自动扫描进程</div>
+                <div style="font-size:12px;color:var(--text-muted)">每3秒扫描，自动隐藏已隐藏应用的运行进程</div>
+            </div>
+            <div id="scan-switch" class="switch" onclick="toggleScan()"></div>
+        </div>
+    </div>
+
+    <!-- 操作 -->
+    <div class="section">
+        <div class="section-title"><span class="icon">⚙️</span> 操作</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-ghost" onclick="refreshList()">刷新列表</button>
+            <button class="btn btn-ghost" onclick="clearAll()">清空全部</button>
+            <button class="btn btn-danger" onclick="unloadModule()">卸载模块</button>
+        </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+        // KernelSU WebUI exec API（通过原生注入对象调用）
+        function exec(cmd) {
+            return new Promise((resolve) => {
+                if (typeof ksu !== 'undefined' && ksu.exec) {
+                    // KSU 原生接口: exec 返回 stdout 字符串
+                    try {
+                        var out = ksu.exec(cmd);
+                        resolve({ errno: 0, stdout: out || '' });
+                        return;
+                    } catch(e) {
+                        resolve({ errno: 1, stdout: '', stderr: String(e) });
+                        return;
+                    }
+                }
+                // 后备: 使用 XMLHttpRequest 到本地 helper
+                resolve({ errno: 1, stdout: '', stderr: 'ksu API not available' });
+            });
+        }
+
+        // Shell 单引号转义, 防止命令注入
+        function shellQuote(s) {
+            return "'" + String(s).replace(/'/g, "'\\''") + "'";
+        }
+
+        // HTML 转义, 防止 XSS
+        function escapeHtml(s) {
+            return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        function showToast(msg) {
+            var t = document.getElementById('toast');
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(function() { t.classList.remove('show'); }, 2000);
+        }
+
+        var PROC = '/proc/.pidmap';
+        var CONF_SAVE = 'sh /data/adb/modules/hidepid/hidepid.sh save';
+
+        // 保存当前配置到 /data/adb/hidepid.json
+        async function saveConfig() {
+            await exec(CONF_SAVE);
+        }
+
+        async function checkStatus() {
+            var ret = await exec('test -e ' + PROC + ' && echo ok');
+            var ok = ret.stdout.trim() === 'ok';
+            var badge = document.getElementById('status');
+            var text = document.getElementById('status-text');
+            if (ok) {
+                badge.className = 'status-badge ok';
+                text.textContent = '模块运行中';
+            } else {
+                badge.className = 'status-badge err';
+                text.textContent = '模块未加载';
+            }
+            return ok;
+        }
+
+        async function refreshList() {
+            var ok = await checkStatus();
+            if (!ok) {
+                document.getElementById('pid-list').innerHTML = '<div class="empty">模块未加载</div>';
+                document.getElementById('app-list').innerHTML = '<div class="empty">模块未加载</div>';
+                var sw = document.getElementById('scan-switch');
+                sw.classList.remove('on');
+                return;
+            }
+            var ret = await exec('cat ' + PROC);
+            var raw = ret.stdout;
+            var lines = raw.trim().split('\n');
+            var pids = [];
+            var apps = [];
+            var inAppSection = false;
+            lines.forEach(function(line) {
+                if (line.indexOf('=== Hidden Apps') >= 0) { inAppSection = true; return; }
+                if (line.indexOf('===') >= 0) { inAppSection = false; return; }
+                if (inAppSection) {
+                    var m = line.match(/^app:\s*(.+)$/);
+                    if (m) apps.push(m[1].trim());
+                } else {
+                    var m2 = line.match(/^pid:\s*(\d+)$/);
+                    if (m2) pids.push(m2[1]);
+                }
+            });
+            // 获取每个 PID 的进程名
+            var pidNames = {};
+            if (pids.length > 0) {
+                var nameCmd = 'for p in ' + pids.join(' ') + '; do n=$(cat /proc/$p/cmdline 2>/dev/null | tr "\\0" " " | awk "{print \\$1}"); [ -z "$n" ] && n=$(cat /proc/$p/comm 2>/dev/null); echo "$p|$n"; done';
+                var nameRet = await exec(nameCmd);
+                nameRet.stdout.trim().split('\n').forEach(function(line) {
+                    var parts = line.split('|');
+                    if (parts.length >= 2) pidNames[parts[0]] = parts[1];
+                });
+            }
+            renderPids(pids, pidNames);
+            renderApps(apps);
+            // 从已获取的 proc 输出中读取扫描状态, 避免冗余 exec
+            updateScanSwitch(raw);
+        }
+
+        function renderPids(pids, pidNames) {
+            var el = document.getElementById('pid-list');
+            if (pids.length === 0) {
+                el.innerHTML = '<div class="empty">暂无隐藏进程</div>';
+                return;
+            }
+            el.innerHTML = pids.map(function(pid) {
+                var name = pidNames[pid] || '';
+                var display = name ? 'PID: ' + escapeHtml(pid) + ' <span style="color:var(--text-muted)">(' + escapeHtml(name) + ')</span>' : 'PID: ' + escapeHtml(pid);
+                return '<div class="list-item"><span class="name">' + display + '</span>' +
+                    '<div class="actions"><button class="btn-sm btn-sm-del" onclick="delPid(\'' + escapeHtml(pid) + '\')">移除</button></div></div>';
+            }).join('');
+        }
+
+        function renderApps(apps) {
+            var el = document.getElementById('app-list');
+            if (apps.length === 0) {
+                el.innerHTML = '<div class="empty">暂无隐藏应用</div>';
+                return;
+            }
+            el.innerHTML = apps.map(function(pkg) {
+                return '<div class="list-item"><span class="name">' + escapeHtml(pkg) + '</span>' +
+                    '<div class="actions"><button class="btn-sm btn-sm-del" onclick="delApp(\'' + escapeHtml(pkg) + '\')">移除</button></div></div>';
+            }).join('');
+        }
+
+        async function addPid() {
+            var input = document.getElementById('pid-input').value.trim();
+            if (!input) { showToast('请输入 PID 或进程名'); return; }
+            if (/^\d+$/.test(input)) {
+                // 数字: 直接作为 PID
+                await exec('echo ' + shellQuote(input) + ' > ' + PROC);
+                showToast('已添加 PID: ' + input);
+            } else {
+                // 文本: 通过 pidof 解析为 PID
+                var ret = await exec('pidof ' + shellQuote(input) + ' 2>/dev/null');
+                var pids = ret.stdout.trim().split(/\s+/).filter(function(p) { return p; });
+                if (pids.length === 0) {
+                    showToast('未找到进程: ' + input);
+                    return;
+                }
+                for (var i = 0; i < pids.length; i++) {
+                    await exec('echo ' + shellQuote(pids[i]) + ' > ' + PROC);
+                }
+                showToast('已隐藏进程: ' + input + ' (PID: ' + pids.join(' ') + ')');
+            }
+            document.getElementById('pid-input').value = '';
+            await saveConfig();
+            refreshList();
+        }
+
+        async function delPid(pid) {
+            await exec('echo ' + shellQuote('-' + pid) + ' > ' + PROC);
+            showToast('已移除 PID: ' + pid);
+            await saveConfig();
+            refreshList();
+        }
+
+        async function addApp() {
+            var pkg = document.getElementById('pkg-input').value.trim();
+            if (!pkg) {
+                var sel = document.getElementById('app-select');
+                pkg = sel.value;
+            }
+            if (!pkg) { showToast('请输入或选择包名'); return; }
+            await exec('echo ' + shellQuote('app:' + pkg) + ' > ' + PROC);
+            document.getElementById('pkg-input').value = '';
+            document.getElementById('app-select').value = '';
+            showToast('已隐藏应用: ' + pkg);
+            await saveConfig();
+            refreshList();
+        }
+
+        async function delApp(pkg) {
+            await exec('echo ' + shellQuote('unapp:' + pkg) + ' > ' + PROC);
+            showToast('已取消隐藏: ' + pkg);
+            await saveConfig();
+            refreshList();
+        }
+
+        async function loadApps() {
+            var sel = document.getElementById('app-select');
+            sel.innerHTML = '<option value="">加载中...</option>';
+            // 使用 KSU listPackages API 获取已安装应用
+            var ret = await exec('pm list packages -3 2>/dev/null | sed "s/package://" | sort');
+            var pkgs = ret.stdout.trim().split('\n').filter(function(p) { return p; });
+            var html = '<option value="">选择应用 (' + pkgs.length + ')</option>';
+            pkgs.forEach(function(pkg) {
+                html += '<option value="' + escapeHtml(pkg) + '">' + escapeHtml(pkg) + '</option>';
+            });
+            sel.innerHTML = html;
+        }
+
+        // 从 proc 输出更新扫描开关状态 (复用已获取数据, 避免冗余 exec)
+        function updateScanSwitch(procOutput) {
+            var sw = document.getElementById('scan-switch');
+            var scanOn = procOutput.indexOf('scan: on') >= 0;
+            if (scanOn) sw.classList.add('on');
+            else sw.classList.remove('on');
+        }
+
+        async function toggleScan() {
+            var sw = document.getElementById('scan-switch');
+            if (sw.classList.contains('on')) {
+                await exec('echo stopscan > ' + PROC);
+                sw.classList.remove('on');
+                showToast('自动扫描已停止');
+            } else {
+                await exec('echo autoscan > ' + PROC);
+                sw.classList.add('on');
+                showToast('自动扫描已启动');
+            }
+            await saveConfig();
+        }
+
+        async function clearAll() {
+            if (!confirm('确认清空所有隐藏的 PID 和应用？')) return;
+            await exec('echo clear > ' + PROC);
+            showToast('已清空全部');
+            await saveConfig();
+            refreshList();
+        }
+
+        async function unloadModule() {
+            if (!confirm('确认卸载内核模块？这将取消所有隐藏。')) return;
+            await exec('echo unload > ' + PROC);
+            showToast('模块卸载中...');
+            setTimeout(function() { refreshList(); }, 2500);
+        }
+
+        // 初始化
+        (async function() {
+            await loadApps();
+            await refreshList();
+            // 每5秒自动刷新
+            setInterval(refreshList, 5000);
+        })();
+    </script>
+</body>
+</html>
