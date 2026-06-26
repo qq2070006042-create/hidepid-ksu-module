@@ -40,6 +40,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Run static checks
+        run: |
+          node tests/check-github-workflow.js
+          node tests/check-c-comments.js
+          node tests/check-kernel-source.js
+          bash -n src/build-all.sh
+          bash -n src/build-module.sh
+          bash -n service.sh
+          bash -n hidepid.sh
+          bash -n uninstall.sh
+
       - name: Install build tools
         run: |
           sudo apt-get update

@@ -24,6 +24,7 @@ for (const kmi of expectedKmis) {
 for (const text of [
   "echo docker > ~/.ddk/mode",
   "echo github > ~/.ddk/source",
+  "node tests/check-kernel-source.js",
   "ddk pull \"${{ matrix.kmi }}\"",
   "HIDE_STEALTH=1 ./build-all.sh \"${{ matrix.kmi }}\"",
   "hidepid-ksu-module-stealth.zip",
