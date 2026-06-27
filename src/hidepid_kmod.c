@@ -240,47 +240,13 @@ static bool scan_active = false;
 
 /* 读取指定进程的 cmdline（包名通常在 cmdline 第一个参数）*/
 typedef int (*set_memory_fn)(unsigned long addr, int numpages);
-typedef int (*access_remote_vm_fn)(struct mm_struct *mm, unsigned long addr,
-                                   void *buf, int len,
-                                   unsigned int gup_flags);
 typedef int (*call_usermodehelper_fn)(const char *path, char **argv,
                                       char **envp, int wait);
 
 static set_memory_fn p_set_memory_rw;
 static set_memory_fn p_set_memory_ro;
 static set_memory_fn p_set_memory_x;
-static access_remote_vm_fn p_access_remote_vm;
 static call_usermodehelper_fn p_call_usermodehelper;
-
-static bool get_task_cmdline(struct task_struct *task, char *buf, int bufsize) {
-    struct mm_struct *mm;
-    int bytes_read = 0;
-
-    if (!p_access_remote_vm) {
-        strscpy(buf, task->comm, bufsize);
-        return buf[0] != '\0';
-    }
-
-    mm = get_task_mm(task);
-    if (!mm) return false;
-
-    if (mm->arg_start && mm->arg_end > mm->arg_start) {
-        unsigned long arg_len = mm->arg_end - mm->arg_start;
-        if (arg_len > bufsize - 1) arg_len = bufsize - 1;
-
-        /* 使用 access_remote_vm 读取进程内存 */
-        bytes_read = p_access_remote_vm(mm, mm->arg_start, buf, arg_len,
-                                        FOLL_FORCE);
-        if (bytes_read > 0) {
-            buf[bytes_read] = '\0';
-            /* cmdline 中参数以 \0 分隔，只取第一个（包名）*/
-            /* 但 Android 的 zygote 进程 cmdline 可能是进程名 */
-        }
-    }
-
-    mmput(mm);
-    return bytes_read > 0;
-}
 
 /* 扫描所有进程，将运行隐藏应用的进程 PID 自动加入隐藏列表 */
 static void scan_work_fn(struct work_struct *work) {
@@ -306,10 +272,12 @@ static void scan_work_fn(struct work_struct *work) {
         return;
     }
 
-    /* 遍历所有进程 */
+    /* 遍历所有进程。RCU 读侧不能读取用户态 cmdline；这里使用 task comm
+     * 作为安全降级，避免 access_remote_vm()/get_task_mm() 在 RCU 内睡眠。 */
     rcu_read_lock();
     for_each_process(task) {
-        if (!get_task_cmdline(task, cmdline, sizeof(cmdline)))
+        get_task_comm(cmdline, task);
+        if (!cmdline[0])
             continue;
 
         /* 检查 cmdline 是否匹配某个隐藏应用 */
@@ -381,12 +349,9 @@ static int resolve_memory_symbols(void) {
 }
 
 static void resolve_optional_runtime_symbols(void) {
-    p_access_remote_vm = (access_remote_vm_fn)ksym("access_remote_vm");
     p_call_usermodehelper =
         (call_usermodehelper_fn)ksym("call_usermodehelper");
 
-    if (!p_access_remote_vm)
-        hide_warn("access_remote_vm unavailable, auto-scan will use task comm\n");
     if (!p_call_usermodehelper)
         hide_warn("call_usermodehelper unavailable, unload needs manual rmmod\n");
 }
@@ -434,8 +399,8 @@ static void unhide_module_to_list(void) {
 
 /* ==================== ARM64 inline hook 基础设施 ==================== */
 
-#define HOOK_BYTES  16  /* 4 条 ARM64 指令 */
-#define TRAMP_BYTES (HOOK_BYTES + 16)
+#define HOOK_BYTES  24  /* BTI + absolute branch sequence */
+#define TRAMP_BYTES (HOOK_BYTES + HOOK_BYTES)
 #define EXECMEM_MODULE_TEXT_TYPE 0
 
 struct hook_ctx {
@@ -447,9 +412,13 @@ struct hook_ctx {
 
 static void encode_branch(u8 *buf, void *addr) {
     u32 *p = (u32 *)buf;
-    p[0] = 0x58000050;           /* LDR X16, [PC, #8] */
-    p[1] = 0xD61F0200;           /* BR  X16           */
-    *(u64 *)&p[2] = (u64)addr;
+    u64 target = (u64)addr;
+
+    p[0] = 0xD503245F;           /* BTI C             */
+    p[1] = 0x58000070;           /* LDR X16, [PC,#12] */
+    p[2] = 0xD61F0200;           /* BR  X16           */
+    p[3] = 0xD503201F;           /* NOP               */
+    memcpy(&p[4], &target, sizeof(target));
 }
 
 /* 检查指令是否为 PC 相对寻址（跳板中执行会出错）*/
@@ -468,12 +437,14 @@ static bool check_safe_to_hook(void *target) {
     u32 *insns = (u32 *)target;
     int i;
     /* 检测目标是否已被 inline hook（我们的或其他模块的跳板签名）*/
-    if (insns[0] == 0x58000050 && insns[1] == 0xD61F0200) {
+    if ((insns[0] == 0x58000050 && insns[1] == 0xD61F0200) ||
+        (insns[0] == 0xD503245F && insns[1] == 0x58000070 &&
+         insns[2] == 0xD61F0200)) {
         hide_err("target appears to be already hooked "
-               "(LDR X16 + BR X16 signature), aborting\n");
+               "(absolute branch signature), aborting\n");
         return false;
     }
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < HOOK_BYTES / 4; i++) {
         if (is_pc_relative(insns[i])) {
             hide_err("instruction at offset %d is PC-relative (0x%08x), "
                    "unsafe for inline hook\n", i * 4, insns[i]);
@@ -681,14 +652,25 @@ static void remove_hook(struct hook_ctx *h) {
 
 /* ==================== PID 解析 ==================== */
 
-static bool parse_pid(const char *name, pid_t *out) {
-    long val = 0;
-    const char *p;
+static bool name_eq_len(const char *name, int namlen, const char *literal) {
+    int litlen;
 
-    if (!name || !*name) return false;
-    for (p = name; *p; ++p) {
-        if (*p < '0' || *p > '9') return false;
-        val = val * 10 + (*p - '0');
+    if (!name || namlen < 0 || !literal)
+        return false;
+
+    litlen = strlen(literal);
+    return namlen == litlen && memcmp(name, literal, litlen) == 0;
+}
+
+static bool parse_pid(const char *name, int namlen, pid_t *out) {
+    long val = 0;
+    int i;
+
+    if (!name || namlen <= 0) return false;
+    for (i = 0; i < namlen; i++) {
+        char c = name[i];
+        if (c < '0' || c > '9') return false;
+        val = val * 10 + (c - '0');
         if (val > INT_MAX) return false;
     }
     *out = (pid_t)val;
@@ -714,10 +696,10 @@ static struct hook_ctx h_filldir;
  *   - 隐藏进程: 看得到一切 (不受限制) */
 
 /* 检查名字是否需要被过滤（模块自身痕迹）*/
-static bool should_hide_name(const char *name) {
-    if (strcmp(name, PROC_NAME) == 0)
+static bool should_hide_name(const char *name, int namlen) {
+    if (name_eq_len(name, namlen, PROC_NAME))
         return true;
-    if (strcmp(name, MODULE_NAME_STR) == 0)
+    if (name_eq_len(name, namlen, MODULE_NAME_STR))
         return true;
     return false;
 }
@@ -734,11 +716,11 @@ static bool should_hide_entry(const char *name, int namlen) {
     /* 以下过滤仅对普通进程生效 */
 
     /* 过滤模块自身痕迹 */
-    if (should_hide_name(name))
+    if (should_hide_name(name, namlen))
         return true;
 
     /* 过滤目标 PID */
-    if (parse_pid(name, &pid) && is_pid_hidden(pid))
+    if (parse_pid(name, namlen, &pid) && is_pid_hidden(pid))
         return true;
 
     /* 过滤目标应用包名 */
@@ -787,7 +769,8 @@ static struct dentry *hook_proc_pid_lookup(struct dentry *dentry,
         return ((proc_pid_lookup_fn)h_proc_pid_lookup.trampoline)(dentry, flags);
 
     /* 普通进程: 阻断直接访问隐藏 PID 的 /proc/<pid>/... */
-    if (parse_pid(dentry->d_name.name, &pid) && is_pid_hidden(pid))
+    if (parse_pid(dentry->d_name.name, dentry->d_name.len, &pid) &&
+        is_pid_hidden(pid))
         return ERR_PTR(-ENOENT);
 
     return ((proc_pid_lookup_fn)h_proc_pid_lookup.trampoline)(dentry, flags);
@@ -1157,22 +1140,7 @@ static int __init hidepid_init(void) {
         hide_info("proc_pid_lookup hooked: direct /proc/<pid> blocked\n");
     }
 
-    /* Hook 网络连接: 过滤隐藏进程的 TCP/UDP 连接 */
-    ret = install_hook(&h_tcp4_seq_show, "tcp4_seq_show", hook_tcp4_seq_show);
-    if (ret) hide_warn("cannot hook tcp4_seq_show (non-fatal): %d\n", ret);
-    else hide_info("tcp4_seq_show hooked: TCP4 connections filtered\n");
-
-    ret = install_hook(&h_tcp6_seq_show, "tcp6_seq_show", hook_tcp6_seq_show);
-    if (ret) hide_warn("cannot hook tcp6_seq_show (non-fatal): %d\n", ret);
-    else hide_info("tcp6_seq_show hooked: TCP6 connections filtered\n");
-
-    ret = install_hook(&h_udp4_seq_show, "udp4_seq_show", hook_udp4_seq_show);
-    if (ret) hide_warn("cannot hook udp4_seq_show (non-fatal): %d\n", ret);
-    else hide_info("udp4_seq_show hooked: UDP4 connections filtered\n");
-
-    ret = install_hook(&h_udp6_seq_show, "udp6_seq_show", hook_udp6_seq_show);
-    if (ret) hide_warn("cannot hook udp6_seq_show (non-fatal): %d\n", ret);
-    else hide_info("udp6_seq_show hooked: UDP6 connections filtered\n");
+    hide_warn("network connection hooks disabled for safe module load\n");
 
     hidepid_entry = proc_create(PROC_NAME, 0600, NULL, &hidepid_proc_ops);
     if (!hidepid_entry) {

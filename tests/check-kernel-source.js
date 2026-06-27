@@ -35,6 +35,56 @@ if (/file->f_owner\.pid/.test(source.replace(/static struct pid \*file_owner_pid
   throw new Error("file->f_owner is a pointer on Linux 6.12; use file_owner_pid()");
 }
 
+if (/strcmp\s*\(\s*name\s*,\s*PROC_NAME\s*\)/.test(codeOnly) ||
+    /strcmp\s*\(\s*name\s*,\s*MODULE_NAME_STR\s*\)/.test(codeOnly)) {
+  throw new Error("filldir names are length-delimited; do not compare them with strcmp()");
+}
+
+if (/static\s+bool\s+parse_pid\s*\(\s*const\s+char\s+\*name\s*,\s*pid_t\s+\*out\s*\)/.test(codeOnly)) {
+  throw new Error("parse_pid must take a name length; filldir and qstr names are not guaranteed NUL-terminated");
+}
+
+if (!/#define\s+HOOK_BYTES\s+24\b/.test(source)) {
+  throw new Error("ARM64 inline hook patch must reserve 24 bytes for a BTI-safe absolute branch");
+}
+
+if (!source.includes("0xD503245F")) {
+  throw new Error("ARM64 inline hook patch must preserve a BTI C landing pad");
+}
+
+if (/p\[0\]\s*=\s*0x58000050/.test(source)) {
+  throw new Error("ARM64 inline hook patch starts with LDR instead of BTI C");
+}
+
+for (const badCall of [
+  "parse_pid(name, &pid)",
+  "parse_pid(dentry->d_name.name, &pid)",
+  "should_hide_name(name)",
+]) {
+  if (codeOnly.includes(badCall)) {
+    throw new Error(`${badCall} ignores the provided name length`);
+  }
+}
+
+const scanWork = source.match(/static void scan_work_fn[\s\S]*?\n}/)?.[0] || "";
+if (/rcu_read_lock\s*\(\s*\)[\s\S]*get_task_cmdline\s*\(/.test(
+    scanWork.replace(/rcu_read_unlock\s*\(\s*\)[\s\S]*/g, "")
+)) {
+  throw new Error("scan_work_fn must not call get_task_cmdline() while holding rcu_read_lock()");
+}
+
+const initFunction = source.match(/static int __init hidepid_init[\s\S]*?module_init/s)?.[0] || "";
+for (const symbol of [
+  "tcp4_seq_show",
+  "tcp6_seq_show",
+  "udp4_seq_show",
+  "udp6_seq_show",
+]) {
+  if (initFunction.includes(`install_hook(&h_${symbol}`)) {
+    throw new Error(`${symbol} hook must not be installed during module init; keep boot load minimal`);
+  }
+}
+
 if (/for\s*\(\s*(?:const\s+)?(?:char|int|long|pid_t|size_t|unsigned|struct)\b/.test(source)) {
   throw new Error("kernel C code must not declare variables in for-loop initializers");
 }
