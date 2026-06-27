@@ -331,11 +331,23 @@ static int resolve_kln(void) {
     return 0;
 }
 
+static int ensure_kallsyms(void) {
+    if (kln_ptr)
+        return 0;
+    return resolve_kln();
+}
+
 static unsigned long ksym(const char *name) {
     return kln_ptr ? kln_ptr(name) : 0;
 }
 
 static int resolve_memory_symbols(void) {
+    int ret;
+
+    ret = ensure_kallsyms();
+    if (ret)
+        return ret;
+
     p_set_memory_rw = (set_memory_fn)ksym("set_memory_rw");
     p_set_memory_ro = (set_memory_fn)ksym("set_memory_ro");
     p_set_memory_x = (set_memory_fn)ksym("set_memory_x");
@@ -349,6 +361,14 @@ static int resolve_memory_symbols(void) {
 }
 
 static void resolve_optional_runtime_symbols(void) {
+    int ret;
+
+    ret = ensure_kallsyms();
+    if (ret) {
+        hide_warn("cannot resolve kallsyms_lookup_name: %d\n", ret);
+        return;
+    }
+
     p_call_usermodehelper =
         (call_usermodehelper_fn)ksym("call_usermodehelper");
 
@@ -363,6 +383,12 @@ static struct list_head *p_modules_list = NULL;
 static bool module_hidden = false;
 
 static int resolve_module_symbols(void) {
+    int ret;
+
+    ret = ensure_kallsyms();
+    if (ret)
+        return ret;
+
     p_module_mutex = (struct mutex *)ksym("module_mutex");
     p_modules_list = (struct list_head *)ksym("modules");
     if (!p_module_mutex || !p_modules_list) {
@@ -409,6 +435,9 @@ struct hook_ctx {
     u8    orig[HOOK_BYTES];
     bool  active;
 };
+
+static DEFINE_MUTEX(hook_state_lock);
+static bool core_hooks_enabled = false;
 
 static void encode_branch(u8 *buf, void *addr) {
     u32 *p = (u32 *)buf;
@@ -776,6 +805,65 @@ static struct dentry *hook_proc_pid_lookup(struct dentry *dentry,
     return ((proc_pid_lookup_fn)h_proc_pid_lookup.trampoline)(dentry, flags);
 }
 
+static void disable_core_hooks_locked(void) {
+    remove_hook(&h_proc_pid_lookup);
+    remove_hook(&h_filldir);
+    remove_hook(&h_filldir64);
+    core_hooks_enabled = false;
+}
+
+static int enable_core_hooks(void) {
+    int ret;
+
+    mutex_lock(&hook_state_lock);
+    if (core_hooks_enabled) {
+        mutex_unlock(&hook_state_lock);
+        return 0;
+    }
+
+    ret = resolve_memory_symbols();
+    if (ret) {
+        hide_err("cannot resolve required memory permission symbols: %d\n",
+                 ret);
+        goto out;
+    }
+
+    ret = install_hook(&h_filldir64, "filldir64", hook_filldir64);
+    if (ret) {
+        hide_err("cannot hook filldir64: %d\n", ret);
+        goto rollback;
+    }
+
+    ret = install_hook(&h_filldir, "filldir", hook_filldir);
+    if (ret)
+        hide_warn("cannot hook filldir (non-fatal): %d\n", ret);
+
+    ret = install_hook(&h_proc_pid_lookup, "proc_pid_lookup",
+                       hook_proc_pid_lookup);
+    if (ret) {
+        hide_warn("cannot hook proc_pid_lookup (non-fatal): %d\n", ret);
+        hide_warn("direct /proc/<pid> access will not be blocked\n");
+    } else {
+        hide_info("proc_pid_lookup hooked: direct /proc/<pid> blocked\n");
+    }
+
+    core_hooks_enabled = true;
+    ret = 0;
+    goto out;
+
+rollback:
+    disable_core_hooks_locked();
+out:
+    mutex_unlock(&hook_state_lock);
+    return ret;
+}
+
+static void disable_core_hooks(void) {
+    mutex_lock(&hook_state_lock);
+    disable_core_hooks_locked();
+    mutex_unlock(&hook_state_lock);
+}
+
 /* ==================== 网络连接隐藏 ==================== */
 /* Hook tcp4/tcp6/udp4/udp6 的 seq_show 函数, 过滤隐藏进程的网络连接.
  * 通过 socket → file → f_owner.pid 查找 socket 归属进程.
@@ -900,6 +988,8 @@ static int hidepid_proc_show(struct seq_file *m, void *v) {
 
     seq_printf(m, "\n=== Scan Status ===\n");
     seq_printf(m, "scan: %s\n", scan_active ? "on" : "off");
+    seq_printf(m, "hooks: %s\n", READ_ONCE(core_hooks_enabled) ? "on" : "off");
+    seq_printf(m, "selfhide: %s\n", module_hidden ? "on" : "off");
 
     kfree(pids_copy);
     kfree(apps_copy);
@@ -939,9 +1029,7 @@ static void unload_work_fn(struct work_struct *work) {
     clear_hide_pids();
     clear_hide_apps();
 
-    remove_hook(&h_filldir);
-    remove_hook(&h_filldir64);
-    remove_hook(&h_proc_pid_lookup);
+    disable_core_hooks();
     remove_hook(&h_tcp4_seq_show);
     remove_hook(&h_tcp6_seq_show);
     remove_hook(&h_udp4_seq_show);
@@ -958,6 +1046,8 @@ static void unload_work_fn(struct work_struct *work) {
         char *envp[] = { "PATH=/system/bin:/system/xbin:/vendor/bin:/sbin",
                          NULL };
         int umh_ret;
+        if (!p_call_usermodehelper)
+            resolve_optional_runtime_symbols();
         if (!p_call_usermodehelper) {
             hide_warn("cannot run rmmod automatically; run rmmod %s manually\n",
                       MODULE_NAME_STR);
@@ -1002,6 +1092,33 @@ static ssize_t hidepid_proc_write(struct file *file, const char __user *buf,
         stop_scan();
         hide_info("unload scheduled (500ms delay)\n");
         schedule_delayed_work(&unload_work, msecs_to_jiffies(500));
+        return count;
+    }
+
+    if (strcmp(kbuf, "hooks:on") == 0) {
+        ret = enable_core_hooks();
+        if (ret)
+            return ret;
+        hide_info("core hooks enabled\n");
+        return count;
+    }
+
+    if (strcmp(kbuf, "hooks:off") == 0) {
+        disable_core_hooks();
+        hide_info("core hooks disabled\n");
+        return count;
+    }
+
+    if (strcmp(kbuf, "selfhide:on") == 0) {
+        ret = resolve_module_symbols();
+        if (ret)
+            return ret;
+        hide_module_from_list();
+        return count;
+    }
+
+    if (strcmp(kbuf, "selfhide:off") == 0) {
+        unhide_module_to_list();
         return count;
     }
 
@@ -1098,64 +1215,20 @@ static const struct proc_ops hidepid_proc_ops = {
 /* ==================== 模块入口/退出 ==================== */
 
 static int __init hidepid_init(void) {
-    int ret;
-
-    ret = resolve_kln();
-    if (ret) {
-        hide_err("cannot resolve kallsyms_lookup_name: %d\n", ret);
-        return ret;
-    }
-
-    ret = resolve_memory_symbols();
-    if (ret) {
-        hide_err("cannot resolve required memory permission symbols: %d\n",
-                 ret);
-        return ret;
-    }
-    resolve_optional_runtime_symbols();
-
-    ret = resolve_module_symbols();
-    if (ret) {
-        hide_warn("cannot resolve module symbols, self-hiding disabled: %d\n", ret);
-    }
-
-    ret = install_hook(&h_filldir64, "filldir64", hook_filldir64);
-    if (ret) {
-        hide_err("cannot hook filldir64: %d\n", ret);
-        return ret;
-    }
-
-    ret = install_hook(&h_filldir, "filldir", hook_filldir);
-    if (ret) {
-        hide_warn("cannot hook filldir (non-fatal): %d\n", ret);
-    }
-
-    /* Hook proc_pid_lookup: 阻断直接访问 /proc/<hidden_pid>/... */
-    ret = install_hook(&h_proc_pid_lookup, "proc_pid_lookup",
-                       hook_proc_pid_lookup);
-    if (ret) {
-        hide_warn("cannot hook proc_pid_lookup (non-fatal): %d\n", ret);
-        hide_warn("direct /proc/<pid> access will not be blocked\n");
-    } else {
-        hide_info("proc_pid_lookup hooked: direct /proc/<pid> blocked\n");
-    }
-
-    hide_warn("network connection hooks disabled for safe module load\n");
+    hide_warn("core inline hooks disabled during module init\n");
+    hide_warn("write hooks:on to /proc/%s to enable filtering\n", PROC_NAME);
+    hide_warn("module self-hide disabled during module init\n");
 
     hidepid_entry = proc_create(PROC_NAME, 0600, NULL, &hidepid_proc_ops);
     if (!hidepid_entry) {
         hide_err("cannot create /proc/%s\n", PROC_NAME);
-        remove_hook(&h_filldir);
-        remove_hook(&h_filldir64);
         return -ENOMEM;
     }
 
     INIT_DELAYED_WORK(&unload_work, unload_work_fn);
     INIT_DELAYED_WORK(&scan_work, scan_work_fn);
 
-    hide_module_from_list();
-
-    hide_info("loaded (pid + app hiding + auto-scan)\n");
+    hide_info("loaded in safe mode (hooks off)\n");
     return 0;
 }
 
@@ -1170,9 +1243,7 @@ static void __exit hidepid_exit(void) {
     clear_hide_pids();
     clear_hide_apps();
     unhide_module_to_list();
-    remove_hook(&h_filldir);
-    remove_hook(&h_filldir64);
-    remove_hook(&h_proc_pid_lookup);
+    disable_core_hooks();
     remove_hook(&h_tcp4_seq_show);
     remove_hook(&h_tcp6_seq_show);
     remove_hook(&h_udp4_seq_show);

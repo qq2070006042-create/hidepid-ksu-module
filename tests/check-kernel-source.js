@@ -83,6 +83,25 @@ if (getTaskCommArg) {
 }
 
 const initFunction = source.match(/static int __init hidepid_init[\s\S]*?module_init/s)?.[0] || "";
+if (initFunction.includes("install_hook(")) {
+  throw new Error("module init must not install inline hooks; load must be side-effect minimal");
+}
+
+for (const riskyInitCall of [
+  "resolve_kln(",
+  "resolve_memory_symbols(",
+  "resolve_module_symbols(",
+  "resolve_optional_runtime_symbols(",
+]) {
+  if (initFunction.includes(riskyInitCall)) {
+    throw new Error(`module init must not call ${riskyInitCall}; resolve kernel symbols lazily`);
+  }
+}
+
+if (initFunction.includes("hide_module_from_list(")) {
+  throw new Error("module init must not hide the module from the modules list");
+}
+
 for (const symbol of [
   "tcp4_seq_show",
   "tcp6_seq_show",

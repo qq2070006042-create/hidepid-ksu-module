@@ -45,7 +45,7 @@ ensure_loaded() {
         dmesg | grep hidepid | tail -10
         exit 1
     fi
-    echo "✓ Module loaded"
+    echo "✓ Module loaded (safe mode, hooks off)"
 }
 
 # ==================== JSON 辅助函数 ====================
@@ -371,6 +371,54 @@ case "$1" in
         save_config > /dev/null 2>&1
         ;;
 
+    hooks)
+        if ! is_loaded; then
+            echo "Module not loaded"
+            exit 0
+        fi
+        case "$2" in
+            on|enable)
+                echo hooks:on > "$PROC_IFACE"
+                echo "✓ Core hooks enabled"
+                ;;
+            off|disable)
+                echo hooks:off > "$PROC_IFACE"
+                echo "✓ Core hooks disabled"
+                ;;
+            status|'')
+                grep '^hooks:' "$PROC_IFACE" 2>/dev/null || echo "hooks: unknown"
+                ;;
+            *)
+                echo "Usage: sh hidepid.sh hooks <on|off|status>"
+                exit 1
+                ;;
+        esac
+        ;;
+
+    selfhide)
+        if ! is_loaded; then
+            echo "Module not loaded"
+            exit 0
+        fi
+        case "$2" in
+            on|enable)
+                echo selfhide:on > "$PROC_IFACE"
+                echo "✓ Module self-hide enabled"
+                ;;
+            off|disable)
+                echo selfhide:off > "$PROC_IFACE"
+                echo "✓ Module self-hide disabled"
+                ;;
+            status|'')
+                grep '^selfhide:' "$PROC_IFACE" 2>/dev/null || echo "selfhide: unknown"
+                ;;
+            *)
+                echo "Usage: sh hidepid.sh selfhide <on|off|status>"
+                exit 1
+                ;;
+        esac
+        ;;
+
     # === 配置管理 ===
     save)
         save_config
@@ -440,6 +488,9 @@ case "$1" in
         echo "  sh hidepid.sh scan              手动扫描一次"
         echo "  sh hidepid.sh autoscan          启动持续自动扫描 (每3秒)"
         echo "  sh hidepid.sh stopscan          停止自动扫描"
+        echo "内核控制:"
+        echo "  sh hidepid.sh hooks <on|off>    启用/关闭核心 inline hook"
+        echo "  sh hidepid.sh selfhide <on|off> 启用/关闭模块自隐藏"
         echo ""
         echo "配置管理:"
         echo "  sh hidepid.sh save              保存当前列表到 $CONF_FILE"

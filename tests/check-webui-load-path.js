@@ -20,4 +20,15 @@ for (const legacy of [
   }
 }
 
+if (!html.includes("id=\"hook-switch\"") || !html.includes("echo hooks:on > ")) {
+  throw new Error("WebUI must expose explicit core hook controls");
+}
+
+for (const fnName of ["addPid", "addApp"]) {
+  const body = html.match(new RegExp(`async function ${fnName}\\(\\)[\\s\\S]*?\\n        }`))?.[0] || "";
+  if (body.includes("hooks:on")) {
+    throw new Error(`WebUI ${fnName} must not implicitly enable core hooks`);
+  }
+}
+
 console.log("WebUI load path checks passed");
