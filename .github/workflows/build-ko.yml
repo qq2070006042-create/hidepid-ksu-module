@@ -54,7 +54,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y zip
+          sudo apt-get install -y zip unzip
 
       - name: Install ddk
         run: |
@@ -123,6 +123,21 @@ jobs:
             hidepid.json \
             ko/ \
             webroot/
+
+      - name: Verify module zip
+        run: |
+          unzip -l hidepid-ksu-module-stealth.zip
+          for kmi in \
+            android12-5.10 \
+            android13-5.10 \
+            android13-5.15 \
+            android14-5.15 \
+            android14-6.1 \
+            android15-6.6 \
+            android16-6.12
+          do
+            unzip -l hidepid-ksu-module-stealth.zip "ko/hidepid-${kmi}.ko" >/dev/null
+          done
 
       - name: Upload module zip
         uses: actions/upload-artifact@v6

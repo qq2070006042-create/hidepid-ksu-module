@@ -50,11 +50,13 @@ for required in module.prop service.sh uninstall.sh hidepid.sh hidepid.json webr
 done
 
 mkdir -p "$MODULE_DIR/ko"
+BUILD_FAILED=0
 
 for kmi in $KMIS; do
     echo "========== Building $kmi =========="
 
     make clean 2>/dev/null || true
+    rm -f "$MODULE_DIR/ko/hidepid-${kmi}.ko"
 
     if ddk build "$kmi" 2>&1; then
         if [ -f "hidepid_kmod.ko" ]; then
@@ -68,8 +70,16 @@ for kmi in $KMIS; do
     else
         echo "✗ Build failed for $kmi"
     fi
+    if [ ! -f "$MODULE_DIR/ko/hidepid-${kmi}.ko" ]; then
+        BUILD_FAILED=1
+    fi
     echo ""
 done
+
+if [ "$BUILD_FAILED" -ne 0 ]; then
+    echo "Error: missing required ko files, refusing to package incomplete module"
+    exit 1
+fi
 
 # 打包成 KSU 模块 zip
 echo "========== Packaging KSU module =========="

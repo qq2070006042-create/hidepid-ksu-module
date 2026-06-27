@@ -25,11 +25,14 @@ for (const text of [
   "uses: actions/checkout@v5",
   "uses: actions/upload-artifact@v6",
   "uses: actions/download-artifact@v7",
+  "sudo apt-get install -y zip unzip",
   "echo docker > ~/.ddk/mode",
   "echo github > ~/.ddk/source",
   "node tests/check-kernel-source.js",
   "ddk pull \"${{ matrix.kmi }}\"",
   "HIDE_STEALTH=1 ./build-all.sh \"${{ matrix.kmi }}\"",
+  "unzip -l hidepid-ksu-module-stealth.zip",
+  "unzip -l hidepid-ksu-module-stealth.zip \"ko/hidepid-${kmi}.ko\"",
   "hidepid-ksu-module-stealth.zip",
 ]) {
   if (!workflow.includes(text)) {

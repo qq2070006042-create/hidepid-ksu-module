@@ -20,6 +20,18 @@ $Checks = @(
     @{
         Name = "stealth zip is written to the repository root"
         Pattern = 'OUTPUT_ZIP="\$MODULE_DIR/hidepid-ksu-module-stealth\.zip"'
+    },
+    @{
+        Name = "build failures are tracked before packaging"
+        Pattern = 'BUILD_FAILED=0'
+    },
+    @{
+        Name = "missing ko files fail the build before packaging"
+        Pattern = 'missing required ko files'
+    },
+    @{
+        Name = "incomplete builds exit before packaging"
+        Pattern = 'if \[ "\$BUILD_FAILED" -ne 0 \]; then'
     }
 )
 
