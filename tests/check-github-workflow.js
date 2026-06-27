@@ -22,6 +22,9 @@ for (const kmi of expectedKmis) {
 }
 
 for (const text of [
+  "uses: actions/checkout@v5",
+  "uses: actions/upload-artifact@v6",
+  "uses: actions/download-artifact@v7",
   "echo docker > ~/.ddk/mode",
   "echo github > ~/.ddk/source",
   "node tests/check-kernel-source.js",
@@ -31,6 +34,16 @@ for (const text of [
 ]) {
   if (!workflow.includes(text)) {
     throw new Error(`workflow is missing required text: ${text}`);
+  }
+}
+
+for (const text of [
+  "uses: actions/checkout@v4",
+  "uses: actions/upload-artifact@v4",
+  "uses: actions/download-artifact@v4",
+]) {
+  if (workflow.includes(text)) {
+    throw new Error(`workflow still uses Node 20 action: ${text}`);
   }
 }
 

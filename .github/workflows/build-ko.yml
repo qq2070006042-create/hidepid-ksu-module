@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Run static checks
         run: |
@@ -78,7 +78,7 @@ jobs:
         run: test -f "src/hidepid-${{ matrix.kmi }}.ko"
 
       - name: Upload ko
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ko-${{ matrix.kmi }}
           path: src/hidepid-${{ matrix.kmi }}.ko
@@ -91,10 +91,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download all ko
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: ko-*
           path: ko
@@ -125,7 +125,7 @@ jobs:
             webroot/
 
       - name: Upload module zip
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: hidepid-ksu-module-stealth
           path: hidepid-ksu-module-stealth.zip
