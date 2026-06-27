@@ -12,6 +12,7 @@
 MODDIR=${0%/*}
 KO_DIR="$MODDIR/ko"
 CONF_FILE="/data/adb/hidepid.json"
+ENABLE_FILE="/data/adb/hidepid.enable"
 
 # JSON 辅助函数
 json_get_array() {
@@ -25,6 +26,12 @@ json_get_bool() {
     grep -o "\"$1\"[[:space:]]*:[[:space:]]*\(true\|false\)" "$2" | \
         grep -oE '(true|false)' | head -1
 }
+
+# Boot autoload is opt-in to prevent kernel panic loops on unsupported devices.
+if [ ! -f "$ENABLE_FILE" ]; then
+    echo "hidepid: autoload disabled; create $ENABLE_FILE to enable boot ko load" > /dev/kmsg 2>/dev/null
+    exit 0
+fi
 
 # 等待系统基本就绪
 sleep 2

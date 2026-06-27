@@ -45,6 +45,8 @@ jobs:
           node tests/check-github-workflow.js
           node tests/check-c-comments.js
           node tests/check-kernel-source.js
+          node tests/check-service-autoload.js
+          node tests/check-webui-load-path.js
           bash -n src/build-all.sh
           bash -n src/build-module.sh
           bash -n service.sh

@@ -392,23 +392,8 @@
         async function addPid() {
             var input = document.getElementById('pid-input').value.trim();
             if (!input) { showToast('请输入 PID 或进程名'); return; }
-            if (/^\d+$/.test(input)) {
-                // 数字: 直接作为 PID
-                await exec('echo ' + shellQuote(input) + ' > ' + PROC);
-                showToast('已添加 PID: ' + input);
-            } else {
-                // 文本: 通过 pidof 解析为 PID
-                var ret = await exec('pidof ' + shellQuote(input) + ' 2>/dev/null');
-                var pids = ret.stdout.trim().split(/\s+/).filter(function(p) { return p; });
-                if (pids.length === 0) {
-                    showToast('未找到进程: ' + input);
-                    return;
-                }
-                for (var i = 0; i < pids.length; i++) {
-                    await exec('echo ' + shellQuote(pids[i]) + ' > ' + PROC);
-                }
-                showToast('已隐藏进程: ' + input + ' (PID: ' + pids.join(' ') + ')');
-            }
+            await exec('sh /data/adb/modules/hidepid/hidepid.sh add ' + shellQuote(input));
+            showToast('已添加: ' + input);
             document.getElementById('pid-input').value = '';
             await saveConfig();
             refreshList();
@@ -428,7 +413,7 @@
                 pkg = sel.value;
             }
             if (!pkg) { showToast('请输入或选择包名'); return; }
-            await exec('echo ' + shellQuote('app:' + pkg) + ' > ' + PROC);
+            await exec('sh /data/adb/modules/hidepid/hidepid.sh app ' + shellQuote(pkg));
             document.getElementById('pkg-input').value = '';
             document.getElementById('app-select').value = '';
             showToast('已隐藏应用: ' + pkg);
