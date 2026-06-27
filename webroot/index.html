@@ -305,6 +305,19 @@
             setTimeout(function() { t.classList.remove('show'); }, 2000);
         }
 
+        async function runChecked(cmd) {
+            var marker = '__hidepid_rc__';
+            var ret = await exec(cmd + ' 2>&1; echo ' + marker + '$?');
+            var out = ret.stdout || '';
+            var m = out.match(new RegExp(marker + '(\\d+)'));
+            var rc = m ? Number(m[1]) : (ret.errno || 1);
+            var text = out.replace(new RegExp('\\n?' + marker + '\\d+\\s*$'), '').trim();
+            if (rc !== 0) {
+                throw new Error(text || ('command failed: ' + cmd));
+            }
+            return text;
+        }
+
         var PROC = '/proc/.pidmap';
         var CONF_SAVE = 'sh /data/adb/modules/hidepid/hidepid.sh save';
 
@@ -402,10 +415,14 @@
         async function addPid() {
             var input = document.getElementById('pid-input').value.trim();
             if (!input) { showToast('请输入 PID 或进程名'); return; }
-            await exec('sh /data/adb/modules/hidepid/hidepid.sh add ' + shellQuote(input));
-            showToast('已添加: ' + input);
-            document.getElementById('pid-input').value = '';
-            await saveConfig();
+            try {
+                await runChecked('sh /data/adb/modules/hidepid/hidepid.sh add ' + shellQuote(input));
+                showToast('已添加: ' + input);
+                document.getElementById('pid-input').value = '';
+                await saveConfig();
+            } catch (e) {
+                showToast('添加失败: ' + e.message);
+            }
             refreshList();
         }
 
@@ -423,11 +440,15 @@
                 pkg = sel.value;
             }
             if (!pkg) { showToast('请输入或选择包名'); return; }
-            await exec('sh /data/adb/modules/hidepid/hidepid.sh app ' + shellQuote(pkg));
-            document.getElementById('pkg-input').value = '';
-            document.getElementById('app-select').value = '';
-            showToast('已隐藏应用: ' + pkg);
-            await saveConfig();
+            try {
+                await runChecked('sh /data/adb/modules/hidepid/hidepid.sh app ' + shellQuote(pkg));
+                document.getElementById('pkg-input').value = '';
+                document.getElementById('app-select').value = '';
+                showToast('已隐藏应用: ' + pkg);
+                await saveConfig();
+            } catch (e) {
+                showToast('隐藏失败: ' + e.message);
+            }
             refreshList();
         }
 
@@ -483,14 +504,18 @@
 
         async function toggleHooks() {
             var sw = document.getElementById('hook-switch');
-            if (sw.classList.contains('on')) {
-                await exec('echo hooks:off > ' + PROC);
-                sw.classList.remove('on');
-                showToast('Core hooks disabled');
-            } else {
-                await exec('echo hooks:on > ' + PROC);
-                sw.classList.add('on');
-                showToast('Core hooks enabled');
+            try {
+                if (sw.classList.contains('on')) {
+                    await runChecked('echo hooks:off > ' + PROC);
+                    sw.classList.remove('on');
+                    showToast('Core hooks disabled');
+                } else {
+                    await runChecked('echo hooks:on > ' + PROC);
+                    sw.classList.add('on');
+                    showToast('Core hooks enabled');
+                }
+            } catch (e) {
+                showToast('Core hooks failed: ' + e.message);
             }
             refreshList();
         }

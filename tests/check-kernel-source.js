@@ -113,6 +113,23 @@ for (const symbol of [
   }
 }
 
+const enableCoreHooksStart = source.indexOf("static int enable_core_hooks");
+const disableCoreHooksStart = source.indexOf("static void disable_core_hooks", enableCoreHooksStart);
+const enableCoreHooks = enableCoreHooksStart >= 0 && disableCoreHooksStart > enableCoreHooksStart
+  ? source.slice(enableCoreHooksStart, disableCoreHooksStart)
+  : "";
+if (enableCoreHooks.includes("install_hook(")) {
+  throw new Error("core hook enable path must not use inline text patching");
+}
+
+if (!enableCoreHooks.includes("register_core_kprobe(")) {
+  throw new Error("core hook enable path should use kernel kprobe registration");
+}
+
+if (!source.includes("register_kprobe(kp)")) {
+  throw new Error("register_core_kprobe() must call register_kprobe()");
+}
+
 if (/for\s*\(\s*(?:const\s+)?(?:char|int|long|pid_t|size_t|unsigned|struct)\b/.test(source)) {
   throw new Error("kernel C code must not declare variables in for-loop initializers");
 }
