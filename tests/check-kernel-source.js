@@ -73,6 +73,15 @@ if (/rcu_read_lock\s*\(\s*\)[\s\S]*get_task_cmdline\s*\(/.test(
   throw new Error("scan_work_fn must not call get_task_cmdline() while holding rcu_read_lock()");
 }
 
+const getTaskCommArg = scanWork.match(/get_task_comm\s*\(\s*(\w+)\s*,/);
+if (getTaskCommArg) {
+  const commVar = getTaskCommArg[1];
+  const declaration = new RegExp(`char\\s+${commVar}\\s*\\[\\s*TASK_COMM_LEN\\s*\\]`);
+  if (!declaration.test(scanWork)) {
+    throw new Error("get_task_comm() requires a TASK_COMM_LEN-sized buffer on Android GKI kernels");
+  }
+}
+
 const initFunction = source.match(/static int __init hidepid_init[\s\S]*?module_init/s)?.[0] || "";
 for (const symbol of [
   "tcp4_seq_show",

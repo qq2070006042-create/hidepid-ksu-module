@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $BuildScriptPath = Join-Path $RepoRoot "src/build-module.sh"
 $BuildScript = Get-Content -Raw -Path $BuildScriptPath
+$BuildAllScriptPath = Join-Path $RepoRoot "src/build-all.sh"
+$BuildAllScript = Get-Content -Raw -Path $BuildAllScriptPath
 
 $Checks = @(
     @{
@@ -43,6 +45,27 @@ foreach ($Check in $Checks) {
 
 if ($BuildScript -match 'hidepid_module') {
     throw "Failed check: build-module.sh still references the removed src/hidepid_module layout"
+}
+
+$BuildAllChecks = @(
+    @{
+        Name = "build-all.sh tracks KMI build failures"
+        Pattern = 'BUILD_FAILED=0'
+    },
+    @{
+        Name = "build-all.sh exits when any requested KMI failed"
+        Pattern = 'if \[ "\$BUILD_FAILED" -ne 0 \]; then'
+    },
+    @{
+        Name = "build-all.sh reports missing ko output"
+        Pattern = 'missing required ko files'
+    }
+)
+
+foreach ($Check in $BuildAllChecks) {
+    if ($BuildAllScript -notmatch $Check.Pattern) {
+        throw "Failed check: $($Check.Name)"
+    }
 }
 
 Write-Host "build-module.sh path checks passed"

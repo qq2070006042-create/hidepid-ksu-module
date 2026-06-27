@@ -251,7 +251,7 @@ static call_usermodehelper_fn p_call_usermodehelper;
 /* 扫描所有进程，将运行隐藏应用的进程 PID 自动加入隐藏列表 */
 static void scan_work_fn(struct work_struct *work) {
     struct task_struct *task;
-    char cmdline[MAX_PKG_NAME_LEN];
+    char comm[TASK_COMM_LEN];
     int i, app_cnt;
     char (*apps_snapshot)[MAX_PKG_NAME_LEN];
     unsigned long flags;
@@ -276,17 +276,17 @@ static void scan_work_fn(struct work_struct *work) {
      * 作为安全降级，避免 access_remote_vm()/get_task_mm() 在 RCU 内睡眠。 */
     rcu_read_lock();
     for_each_process(task) {
-        get_task_comm(cmdline, task);
-        if (!cmdline[0])
+        get_task_comm(comm, task);
+        if (!comm[0])
             continue;
 
-        /* 检查 cmdline 是否匹配某个隐藏应用 */
+        /* 检查 comm 是否匹配某个隐藏应用 */
         for (i = 0; i < app_cnt; i++) {
-            if (strcmp(cmdline, apps_snapshot[i]) == 0) {
+            if (strcmp(comm, apps_snapshot[i]) == 0) {
                 pid_t pid = task->pid;
                 if (!is_pid_hidden(pid)) {
                     add_hide_pid(pid);
-                    hide_info("auto-hide pid=%d (%s)\n", pid, cmdline);
+                    hide_info("auto-hide pid=%d (%s)\n", pid, comm);
                 }
                 break;
             }
