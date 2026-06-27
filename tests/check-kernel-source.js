@@ -1,6 +1,10 @@
 const fs = require("fs");
 
 const source = fs.readFileSync("src/hidepid_kmod.c", "utf8");
+const codeOnly = source
+  .replace(/\/\*[\s\S]*?\*\//g, "")
+  .replace(/\/\/.*$/gm, "")
+  .replace(/"(?:\\.|[^"\\])*"/g, '""');
 
 if (/\bmodule_(alloc|free)\s*\(/.test(source) &&
     !source.includes("#include <linux/moduleloader.h>")) {
@@ -13,6 +17,18 @@ if (/\bmodule_free\s*\(/.test(source)) {
 
 if (/\bmodule_(alloc|memfree)\s*\(/.test(source)) {
   throw new Error("trampoline memory must use alloc_trampoline/free_trampoline compatibility wrappers");
+}
+
+for (const symbol of [
+  "set_memory_rw",
+  "set_memory_ro",
+  "set_memory_x",
+  "access_remote_vm",
+  "call_usermodehelper",
+]) {
+  if (new RegExp(`\\b${symbol}\\s*\\(`).test(codeOnly)) {
+    throw new Error(`${symbol} is not exported on some Android GKI kernels; resolve it via kallsyms instead of calling it directly`);
+  }
 }
 
 if (/file->f_owner\.pid/.test(source.replace(/static struct pid \*file_owner_pid[\s\S]*?\n}/, ""))) {

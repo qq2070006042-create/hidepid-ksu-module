@@ -239,9 +239,27 @@ static bool scan_active = false;
 #define SCAN_INTERVAL_MS 3000  /* 每 3 秒扫描一次 */
 
 /* 读取指定进程的 cmdline（包名通常在 cmdline 第一个参数）*/
+typedef int (*set_memory_fn)(unsigned long addr, int numpages);
+typedef int (*access_remote_vm_fn)(struct mm_struct *mm, unsigned long addr,
+                                   void *buf, int len,
+                                   unsigned int gup_flags);
+typedef int (*call_usermodehelper_fn)(const char *path, char **argv,
+                                      char **envp, int wait);
+
+static set_memory_fn p_set_memory_rw;
+static set_memory_fn p_set_memory_ro;
+static set_memory_fn p_set_memory_x;
+static access_remote_vm_fn p_access_remote_vm;
+static call_usermodehelper_fn p_call_usermodehelper;
+
 static bool get_task_cmdline(struct task_struct *task, char *buf, int bufsize) {
     struct mm_struct *mm;
     int bytes_read = 0;
+
+    if (!p_access_remote_vm) {
+        strscpy(buf, task->comm, bufsize);
+        return buf[0] != '\0';
+    }
 
     mm = get_task_mm(task);
     if (!mm) return false;
@@ -251,7 +269,8 @@ static bool get_task_cmdline(struct task_struct *task, char *buf, int bufsize) {
         if (arg_len > bufsize - 1) arg_len = bufsize - 1;
 
         /* 使用 access_remote_vm 读取进程内存 */
-        bytes_read = access_remote_vm(mm, mm->arg_start, buf, arg_len, FOLL_FORCE);
+        bytes_read = p_access_remote_vm(mm, mm->arg_start, buf, arg_len,
+                                        FOLL_FORCE);
         if (bytes_read > 0) {
             buf[bytes_read] = '\0';
             /* cmdline 中参数以 \0 分隔，只取第一个（包名）*/
@@ -346,6 +365,30 @@ static int resolve_kln(void) {
 
 static unsigned long ksym(const char *name) {
     return kln_ptr ? kln_ptr(name) : 0;
+}
+
+static int resolve_memory_symbols(void) {
+    p_set_memory_rw = (set_memory_fn)ksym("set_memory_rw");
+    p_set_memory_ro = (set_memory_fn)ksym("set_memory_ro");
+    p_set_memory_x = (set_memory_fn)ksym("set_memory_x");
+
+    if (!p_set_memory_rw || !p_set_memory_ro || !p_set_memory_x) {
+        hide_err("cannot resolve set_memory_* symbols\n");
+        return -ENOENT;
+    }
+
+    return 0;
+}
+
+static void resolve_optional_runtime_symbols(void) {
+    p_access_remote_vm = (access_remote_vm_fn)ksym("access_remote_vm");
+    p_call_usermodehelper =
+        (call_usermodehelper_fn)ksym("call_usermodehelper");
+
+    if (!p_access_remote_vm)
+        hide_warn("access_remote_vm unavailable, auto-scan will use task comm\n");
+    if (!p_call_usermodehelper)
+        hide_warn("call_usermodehelper unavailable, unload needs manual rmmod\n");
 }
 
 /* ==================== 模块链表自隐藏（安全版） ==================== */
@@ -460,7 +503,9 @@ static int set_target_memory_rw(void *target) {
     unsigned long end_addr = addr + HOOK_BYTES;
     unsigned long end_page = (end_addr - 1) & PAGE_MASK;
     int npages = (end_page - start_page) / PAGE_SIZE + 1;
-    return set_memory_rw(start_page, npages);
+    if (!p_set_memory_rw)
+        return -ENOENT;
+    return p_set_memory_rw(start_page, npages);
 }
 
 static int set_target_memory_ro(void *target) {
@@ -469,7 +514,9 @@ static int set_target_memory_ro(void *target) {
     unsigned long end_addr = addr + HOOK_BYTES;
     unsigned long end_page = (end_addr - 1) & PAGE_MASK;
     int npages = (end_page - start_page) / PAGE_SIZE + 1;
-    return set_memory_ro(start_page, npages);
+    if (!p_set_memory_ro)
+        return -ENOENT;
+    return p_set_memory_ro(start_page, npages);
 }
 
 static int set_trampoline_memory_rx(void *addr, size_t size) {
@@ -479,11 +526,14 @@ static int set_trampoline_memory_rx(void *addr, size_t size) {
     int npages = (end_page - start_page) / PAGE_SIZE + 1;
     int ret;
 
-    ret = set_memory_x(start_page, npages);
+    if (!p_set_memory_x || !p_set_memory_ro)
+        return -ENOENT;
+
+    ret = p_set_memory_x(start_page, npages);
     if (ret)
         return ret;
 
-    return set_memory_ro(start_page, npages);
+    return p_set_memory_ro(start_page, npages);
 }
 
 typedef void *(*module_alloc_fn)(unsigned long size);
@@ -582,9 +632,17 @@ static int install_hook(struct hook_ctx *h, const char *sym, void *hook_fn) {
         pd.dst = h->target;
         pd.src = patch;
 
-        set_target_memory_rw(h->target);
+        ret = set_target_memory_rw(h->target);
+        if (ret) {
+            hide_err("failed to mark target writable: %d\n", ret);
+            free_trampoline(h->trampoline);
+            h->trampoline = NULL;
+            return ret;
+        }
         stop_machine(apply_patch_fn, &pd, NULL);
-        set_target_memory_ro(h->target);
+        ret = set_target_memory_ro(h->target);
+        if (ret)
+            hide_warn("failed to restore target read-only: %d\n", ret);
     }
 
     h->active = true;
@@ -596,10 +654,18 @@ static int install_hook(struct hook_ctx *h, const char *sym, void *hook_fn) {
 static void remove_hook(struct hook_ctx *h) {
     if (!h->active) return;
     {
+        int ret;
         struct patch_data pd = { .dst = h->target, .src = h->orig };
-        set_target_memory_rw(h->target);
+        ret = set_target_memory_rw(h->target);
+        if (ret) {
+            hide_err("failed to mark target writable for unhook: %d\n", ret);
+            return;
+        }
         stop_machine(apply_patch_fn, &pd, NULL);
-        set_target_memory_ro(h->target);
+        ret = set_target_memory_ro(h->target);
+        if (ret)
+            hide_warn("failed to restore target read-only after unhook: %d\n",
+                      ret);
     }
 
     /* 等待所有 CPU 退出 hook 函数后再释放跳板 */
@@ -908,7 +974,13 @@ static void unload_work_fn(struct work_struct *work) {
                          NULL };
         char *envp[] = { "PATH=/system/bin:/system/xbin:/vendor/bin:/sbin",
                          NULL };
-        int umh_ret = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
+        int umh_ret;
+        if (!p_call_usermodehelper) {
+            hide_warn("cannot run rmmod automatically; run rmmod %s manually\n",
+                      MODULE_NAME_STR);
+            return;
+        }
+        umh_ret = p_call_usermodehelper(argv[0], argv, envp, UMH_WAIT_EXEC);
         if (umh_ret)
             hide_err("call_usermodehelper failed: %d\n", umh_ret);
     }
@@ -1050,6 +1122,14 @@ static int __init hidepid_init(void) {
         hide_err("cannot resolve kallsyms_lookup_name: %d\n", ret);
         return ret;
     }
+
+    ret = resolve_memory_symbols();
+    if (ret) {
+        hide_err("cannot resolve required memory permission symbols: %d\n",
+                 ret);
+        return ret;
+    }
+    resolve_optional_runtime_symbols();
 
     ret = resolve_module_symbols();
     if (ret) {
